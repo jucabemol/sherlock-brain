@@ -86,7 +86,8 @@ def joined(prev_dir, index, dst, seed=None):
 
 
 def inbox(url, token, ev, owners):
-    """Every unmerged item → the evidence (newer word from the same install replaces its older one). → last id read."""
+    """Every unmerged item → the evidence (newer word from the same install replaces its older one).
+    → (last id read, how many items were new tonight): the cursor alone is never news (09/11: it published every night)."""
     last = int((ev.execute("SELECT v FROM meta WHERE k = 'cursor'").fetchone() or [0])[0])
     top = last
     while True:
@@ -111,7 +112,7 @@ def inbox(url, token, ev, owners):
             top = max(top, r['id'])
         ev.execute("INSERT OR REPLACE INTO meta VALUES ('cursor', ?)", (str(top),))
         ev.commit()
-    return top
+    return top, top - last
 
 
 def taxonomy(path='taxonomy.json'):
@@ -178,7 +179,7 @@ def merge(b, ev, tax):
     return added, moved
 
 
-def gate(b, ev, prev_sounds, moved, tax_changed):
+def gate(b, ev, prev_sounds, moved, tax_changed, tax=None):
     """→ None when the new brain may be published, else why not."""
     if b.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
         return 'integrity'
@@ -187,7 +188,7 @@ def gate(b, ev, prev_sounds, moved, tax_changed):
         return f'fewer sounds ({n} < {prev_sounds})'
     for k, c, _ in ev.execute('SELECT k, cat, max(at) FROM votes WHERE owner = 1 GROUP BY k'):
         got = b.execute('SELECT category FROM cat WHERE fp = ?', (k,)).fetchone()
-        if got and got[0] is not None and c and got[0] != c and not tax_changed:
+        if got and got[0] is not None and c and got[0] != tr(c, tax or {}) and not tax_changed:  # the vote as the taxonomy reads it today
             return f'an owner vote not honoured ({k})'
     cats = b.execute('SELECT count(*) FROM cat').fetchone()[0]
     if not tax_changed and cats and moved > MOVE_MAX * cats:
@@ -268,16 +269,16 @@ def main():
             shutil.copyfileobj(f, g)
     ev = sqlite3.connect(evp)
     ev.executescript(EVIDENCE)
-    top = inbox(url, token, ev, owners) if url and token else 0
+    top, fresh = inbox(url, token, ev, owners) if url and token else (0, 0)
     tax = taxonomy()
     tax_changed = bool(index) and index.get('taxonomy') != tax['version']
     prev_sounds = sum(s['n'] for s in (index or {}).get('shards', []))
     added, moved = merge(b, ev, tax)
-    why = gate(b, ev, prev_sounds, moved, tax_changed)
-    print(f'merge: +{added} sounds, {moved} categories moved, gate: {why or "pass"}')
+    why = gate(b, ev, prev_sounds, moved, tax_changed, tax)
+    print(f'merge: {fresh} new items, +{added} sounds, {moved} categories moved, gate: {why or "pass"}')
     if why:
         raise SystemExit(f'not published: {why}')
-    if index and not (top or added or moved or tax_changed):  # a quiet night: the newest brain stays as it is
+    if index and not (fresh or added or moved or tax_changed):  # a quiet night: the newest brain stays as it is
         print('nothing new: not published')
         return
     version = (index or {}).get('version', 0) + 1
@@ -296,7 +297,7 @@ def main():
         return
     files = sorted(os.path.join(out, f) for f in os.listdir(out))
     sh('gh', 'release', 'create', new['tag'], '--repo', repo, '--title', f'Brain v{version}', '--notes', f'+{added} sounds · {moved} categories moved', *files)
-    if url and token and top:
+    if url and token and fresh:
         urllib.request.urlopen(urllib.request.Request(f'{url.rstrip("/")}/ack', data=json.dumps({'upto': top}).encode(),
                                headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json', 'User-Agent': 'sherlock-merge'}), timeout=60)
     print(f'published {new["tag"]}')
