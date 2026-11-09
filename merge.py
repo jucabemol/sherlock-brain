@@ -277,6 +277,9 @@ def main():
     print(f'merge: +{added} sounds, {moved} categories moved, gate: {why or "pass"}')
     if why:
         raise SystemExit(f'not published: {why}')
+    if index and not (top or added or moved or tax_changed):  # a quiet night: the newest brain stays as it is
+        print('nothing new: not published')
+        return
     version = (index or {}).get('version', 0) + 1
     out = os.path.join(a.work, 'out')
     shutil.rmtree(out, ignore_errors=True)
@@ -297,6 +300,15 @@ def main():
         urllib.request.urlopen(urllib.request.Request(f'{url.rstrip("/")}/ack', data=json.dumps({'upto': top}).encode(),
                                headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json', 'User-Agent': 'sherlock-merge'}), timeout=60)
     print(f'published {new["tag"]}')
+    prune(repo)
+
+
+def prune(repo, keep=2):
+    """The server keeps the newest brain and the one before it (one step back); the owner's Mac mirrors every version."""
+    tags = json.loads(sh('gh', 'release', 'list', '--repo', repo, '--limit', '200', '--json', 'tagName,createdAt') or '[]')
+    tags = sorted((t for t in tags if t['tagName'].startswith('brain-v')), key=lambda t: int(t['tagName'][7:]), reverse=True)
+    for t in tags[keep:]:
+        sh('gh', 'release', 'delete', t['tagName'], '--repo', repo, '--yes', '--cleanup-tag')
 
 
 if __name__ == '__main__':
