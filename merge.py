@@ -87,9 +87,18 @@ def joined(prev_dir, index, dst, seed=None):
 
 def inbox(url, token, ev, owners):
     """Every unmerged item → the evidence (newer word from the same install replaces its older one).
-    → (last id read, how many items were new tonight): the cursor alone is never news (09/11: it published every night)."""
+    → (last id read, how many rows really changed): the cursor alone, or the same items sent again on every launch, are
+    never news (09/11: it published every night)."""
     last = int((ev.execute("SELECT v FROM meta WHERE k = 'cursor'").fetchone() or [0])[0])
-    top = last
+    top, fresh = last, 0
+
+    def put(table, keys, row):  # → 1 only when the row is new or differs: the same word sent again is not news
+        nonlocal fresh
+        cols = [c[1] for c in ev.execute(f'PRAGMA table_info({table})')]
+        old = ev.execute(f'SELECT * FROM {table} WHERE ' + ' AND '.join(f'{c} = ?' for c in cols[:len(keys)]), keys).fetchone()
+        if old != tuple(row):
+            ev.execute(f'INSERT OR REPLACE INTO {table} VALUES ({",".join("?" * len(row))})', row)
+            fresh += 1
     while True:
         req = urllib.request.Request(f'{url.rstrip("/")}/pull?after={top}', headers={'Authorization': f'Bearer {token}', 'User-Agent': 'sherlock-merge'})
         rows = json.loads(urllib.request.urlopen(req, timeout=120).read())
@@ -98,21 +107,23 @@ def inbox(url, token, ev, owners):
         for r in rows:
             it, who, own = json.loads(r['body']), r['install'], int(r['owner'] or r['install'] in owners)
             if it['t'] == 'vote' and it.get('cat'):
-                ev.execute('INSERT INTO votes VALUES (?,?,?,?,?) ON CONFLICT (k, install) DO UPDATE SET cat = excluded.cat, at = excluded.at, owner = excluded.owner '
-                           'WHERE excluded.at >= votes.at', (it['k'], who, own, it['cat'], it.get('at') or r['at']))
+                old = ev.execute('SELECT owner, cat, at FROM votes WHERE k = ? AND install = ?', (it['k'], who)).fetchone()
+                at = it.get('at') or r['at']
+                if not old or (at >= old[2] and (old[0], old[1]) != (own, it['cat'])):
+                    put('votes', (it['k'], who), (it['k'], who, own, it['cat'], at))
             elif it['t'] == 'sound':
-                ev.execute('INSERT OR REPLACE INTO sounds VALUES (?,?,?,?,?,?,?,?,?,?,?)', (it['k'], who, own, it.get('kind'), it.get('cat'), it.get('bpm'), it.get('key'),
-                           it.get('bconf'), it.get('est'), it.get('bars'), base64.b64decode(it['vec']) if it.get('vec') else None))
+                put('sounds', (it['k'], who), (it['k'], who, own, it.get('kind'), it.get('cat'), it.get('bpm'), it.get('key'),
+                    it.get('bconf'), it.get('est'), it.get('bars'), base64.b64decode(it['vec']) if it.get('vec') else None))
             elif it['t'] == 'ref':
-                ev.execute('INSERT OR REPLACE INTO refs VALUES (?,?,?,?,?,?,?)', (it['fp'], who, it.get('n'), base64.b64decode(it['vecs']) if it.get('vecs') else None,
-                           json.dumps(it.get('starts')), it.get('win'), json.dumps(it.get('mood'))))
+                put('refs', (it['fp'], who), (it['fp'], who, it.get('n'), base64.b64decode(it['vecs']) if it.get('vecs') else None,
+                    json.dumps(it.get('starts')), it.get('win'), json.dumps(it.get('mood'))))
             elif it['t'] == 'preset' and it.get('v'):
-                ev.execute('INSERT OR REPLACE INTO presets VALUES (?,?,?,?,?,?,?,?,?)', (it['h'], it.get('kind'), who, own, it.get('product'), it.get('vendor'),
-                           it.get('name'), it.get('cat'), base64.b64decode(it['v'])))
+                put('presets', (it['h'], it.get('kind'), who), (it['h'], it.get('kind'), who, own, it.get('product'), it.get('vendor'),
+                    it.get('name'), it.get('cat'), base64.b64decode(it['v'])))
             top = max(top, r['id'])
         ev.execute("INSERT OR REPLACE INTO meta VALUES ('cursor', ?)", (str(top),))
         ev.commit()
-    return top, top - last
+    return top, fresh
 
 
 def taxonomy(path='taxonomy.json'):
