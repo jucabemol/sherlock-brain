@@ -85,6 +85,13 @@ def joined(prev_dir, index, dst, seed=None):
     return b
 
 
+def _items(body):
+    """A row's items: a whole push kept as one row (11/11: one row per item spent the free plan's 100 000 writes a day),
+    or one item of the rows written before that."""
+    b = json.loads(body)
+    return b if isinstance(b, list) else [b]
+
+
 def inbox(url, token, ev, owners):
     """Every unmerged item → the evidence (newer word from the same install replaces its older one).
     → (last id read, how many rows really changed): the cursor alone, or the same items sent again on every launch, are
@@ -104,8 +111,8 @@ def inbox(url, token, ev, owners):
         rows = json.loads(urllib.request.urlopen(req, timeout=120).read())
         if not rows:
             break
-        for r in rows:
-            it, who, own = json.loads(r['body']), r['install'], int(r['owner'] or r['install'] in owners)
+        for r, it in ((r, it) for r in rows for it in _items(r['body'])):
+            who, own = r['install'], int(r['owner'] or r['install'] in owners)
             if it['t'] == 'vote' and it.get('cat'):
                 old = ev.execute('SELECT owner, cat, at FROM votes WHERE k = ? AND install = ?', (it['k'], who)).fetchone()
                 at = it.get('at') or r['at']
